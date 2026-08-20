@@ -1,0 +1,2 @@
+# pine-script
+Trading bot
