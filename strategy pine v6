@@ -2,10 +2,10 @@
 strategy("Super Trend [2023] Push back", shorttitle = "STPB 23 V5", overlay=true,
      currency="USD", margin_long = 3.33, margin_short = 3.33,
      calc_on_order_fills= false, calc_on_every_tick= true,
-     use_bar_magnifier= false,
-     initial_capital=1000, slippage= 3, 
-     commission_value = 0.000035,
-     commission_type=strategy.commission.cash_per_contract, max_labels_count = 500)
+     use_bar_magnifier= false, default_qty_type =  strategy.percent_of_equity, default_qty_value = 100,
+     initial_capital=1000, slippage= 5, 
+     commission_value = 0.00007,
+     commission_type=strategy.commission.cash_per_order, max_labels_count = 500)
 
 
 // Helper functions for session validation
@@ -54,20 +54,27 @@ sessionsOverlap(sess1, sess2) =>
 // Import Zen library
 import ZenAndTheArtOfTrading/ZenLibrary/12 as zen
 
+// Global helper functions for debug status table (must be at global scope in Pine)
+f_statusColor(bool ok) => ok ? color.new(color.green, 70) : color.new(color.red, 70)
+f_statusText(bool ok)  => ok ? "PASS ✓" : "BLOCK ✗"
+
 // SuperTrend Setting 
 var s_Trend                   = "🟰🟰🟰🟰🟰🟰🟰🟰🟰 SuperTrend 🟟 🟰🟰🟰🟰🟰🟰🟰🟰🟰"
-stPeriods                     = input.int(defval= 7, title="ST ATR Period", group=s_Trend, tooltip="Length of the ATR period used to calculate SuperTrend bands")
+// === APPLIED FIXES FOR PROFITABILITY (v5.1 Clean Baseline) ===
+// 1. Slowed SuperTrend (was 7/2) → fewer whipsaws on 1H FX
+stPeriods                     = input.int(defval=12, title="ST ATR Period", group=s_Trend, tooltip="Length of the ATR period (raised from 7 → 12 for fewer false flips)")
 stSource                      = input.source(defval=close, title="Source", group=s_Trend, tooltip="Price source used for SuperTrend calculations")
-stMultiplier                  = input.float(defval=2, title="ST Multiplier", step=0.1, group=s_Trend, tooltip="Multiplier applied to ATR to determine distance from price for SuperTrend bands")
+stMultiplier                  = input.float(defval=2.8, title="ST Multiplier", step=0.1, group=s_Trend, tooltip="Multiplier applied to ATR (raised from 2.0 → 2.8 for cleaner trends)")
 stChangeATR                   = input.bool(defval=false, title="Change ATR?", group=s_Trend, tooltip="When enabled, uses SMA for ATR calculation instead of RMA for SuperTrend")
-plotST                        = input.bool(defval=true, title="Plot ST", group=s_Trend, tooltip="Toggle visibility of SuperTrend indicator on chart")
+//plotST                        = input.bool(defval=true, title="Plot ST", group=s_Trend, tooltip="Toggle visibility of SuperTrend indicator on chart")
 maType                        = input.string(defval="SMMA", title="Method", options=["SMA", "SMMA", "EMA", "RMA", "WMA", "VWMA"], group=s_Trend, tooltip="Moving average type used for various calculations in the script")
 
 var s_EntryRefine         = "🟰🟰🟰🟰 Entry Refinements 🟰🟰🟰🟰"
-cleanMode                 = input.bool(false, "Clean Mode (Stricter Entries)", group=s_EntryRefine, tooltip="Enables impulse + momentum confirmation for cleaner trend entries")
+// 2. Clean Mode left OFF by default (too strict). Volume spike requirement relaxed.
+cleanMode                 = input.bool(false, "Clean Mode (Stricter Entries)", group=s_EntryRefine, tooltip="Enables impulse + momentum confirmation for cleaner trend entries (keep OFF for higher trade quality baseline)")
 impulseLookback           = input.int(5, "Impulse Confirmation Bars", minval=3, group=s_EntryRefine)
 minImpulseATR             = input.float(1.0, "Min Impulse Size (ATR)", step=0.1, group=s_EntryRefine)
-requireVolSpike           = input.bool(true, "Require Volume Spike on Entry", group=s_EntryRefine)
+requireVolSpike           = input.bool(false, "Require Volume Spike on Entry", group=s_EntryRefine, tooltip="Disabled by default – was filtering too many good trend entries")
 rsiMomentumMult           = input.float(1.2, "RSI Momentum Strength", step=0.1, group=s_EntryRefine)
 
 var s_Range                   = "🟰🟰🟰🟰🟰🟰🟰🟰🟰 Range Filter Setting 🟟 🟰🟰🟰🟰🟰🟰🟰🟰🟰"
@@ -76,7 +83,8 @@ rangeLookback                 = input.int(defval= 14, title="Range Lookback Peri
 // priceRange had to be less than 0.8% of ATR, which was almost never true.
 // 1.5 means the range must be within 1.5x ATR, which is a realistic consolidation threshold.
 rangeThreshold                = input.float(defval=1.5, minval=0.0, step=0.1, title="Range Threshold (ATR Multiple)", group=s_Range, tooltip="Threshold for identifying ranging markets as a multiple of ATR. 1.0-2.0 is typical. The original 0.008 was near-impossible to trigger.")
-i_hybridMeanRevInRange        = input.bool(true, title="Enable Hybrid Mode: Mean-Reversion in Ranges", group=s_Range, tooltip="If enabled (recommended), automatically uses RSI mean-reversion entries inside ranging periods and original push-back SuperTrend trend-following after breakout.")
+// 3. Hybrid Mean-Reversion DISABLED by default – it was destroying win rate in trending markets
+i_hybridMeanRevInRange        = input.bool(false, title="Enable Hybrid Mode: Mean-Reversion in Ranges", group=s_Range, tooltip="DISABLED by default. When true, uses RSI mean-reversion inside ranges. Pure SuperTrend trend-following is more robust.")
 
 // Get user input
 var g_system                  = "🟰🟰🟰🟰🟰🟰🟰🟰🟰🟰🟰🟰🟰🟰 System Entry Settings 🟟🟰🟰🟰🟰🟰🟰🟰🟰🟰🟰🟰🟰🟰🟰"
@@ -88,9 +96,9 @@ i_Sl_anchor                   = input.string(title="SL Anchor Price", defval="Cl
 i_BreakEven                   = input.float(title="Break-Even Risk:Reward", defval= 0, minval=0, step=0.1, group=g_system, tooltip="Risk:Reward ratio at which stop loss moves to break-even (0 disables)")
 i_TrailStop                   = input.float(title="Trailing Stop Distance", defval= 0, minval=0, step=0.1, group=g_system, tooltip="Risk:Reward ratio at which trailing stop activates (0 disables)")
 i_signalType                  = input.string(title="Enable Signals", defval="Both", group=g_system, options=["Both", "Long", "Short"], tooltip="Which signals (long/short) to enable")
-i_showEMA_Value               = input.bool(defval=true, title='Show EMA Value', group=g_system, tooltip="Toggle visibility of EMA value on chart")
+//i_showEMA_Value               = input.bool(defval=true, title='Show EMA Value', group=g_system, tooltip="Toggle visibility of EMA value on chart")
 simpleStyle                   = input.bool(defval= false, title= 'Simple display text style for labels', inline="Interval for highest and lowest bars", group=g_system, tooltip="Simplifies label styling for better readability on all backgrounds")
-i_debugMissedTrades           = input.bool(defval= true, title= "Debug Missed Trades", group=g_system, tooltip="Show labels when trade signals are filtered out")
+i_debugMissedTrades           = input.bool(defval= true, title= "Debug Missed Trades", group=g_system, tooltip="Show Yellow labels explaining when trade signals are filtered out")
 i_allowMultipleTrades         = input.bool(defval= false, title= "Allow Multiple Trades", group=g_system, tooltip="Allow multiple open positions simultaneously")
 
 var monte_system              = "🟰🟰🟰🟰🟰🟰🟰🟰🟰🟰🟰🟰🟰🟰 Monte Carlo Settings 🟟🟰🟰🟰🟰🟰🟰🟰🟰🟰🟰🟰🟰🟰🟰"
@@ -105,12 +113,13 @@ bool i_auto_resume_trading    = input.bool(false, "Auto Resume Trading After Rec
 bool i_use_mdd_Label          = input.bool(false, "Use Maximum Drawdown Safety Label", group=g_risk, tooltip="Show drawdown status label on chart")
 float i_max_dd                = input.float(15, "Maximum Drawdown %", group=g_risk, tooltip="Percentage drawdown at which trading halts")
 float i_recovery_threshold    = input.float(5, "Recovery Threshold %", minval=1, maxval=100, step=1, group=g_risk, tooltip="Percentage recovery needed to resume trading")
-float i_rr1                   = input.float(title="Profit Risk:Reward Target 1", defval=2, step=0.1, group=g_risk, tooltip="First take profit target in risk:reward terms")
-float i_rr2                   = input.float(title="Profit Risk:Reward Target 2", defval=3, step=0.1, group=g_risk, tooltip="Second take profit target in risk:reward terms")
-float i_rr3                   = input.float(title="Profit Risk:Reward Target 3", defval=4, step=0.1, group=g_risk, tooltip="Third take profit target in risk:reward terms")
-float i_target1               = input.float(title="Profit % Target 1", defval=20, step= 5, group=g_risk, tooltip="First profit target as percentage of risk")
-float i_target2               = input.float(title="Profit % Target 2", defval=50, step= 5, group=g_risk, tooltip="Second profit target as percentage of risk")
-float i_riskPerTrade          = input.float(title="Forex Risk Per Trade %", defval= 1.0, step=0.1, group=g_risk, tooltip="Percentage of capital to risk per trade")
+// 4. Simplified targets + lower risk. Focus on TP1 (RR 2.0). Higher TPs reduced impact until win-rate improves.
+float i_rr1                   = input.float(title="Profit Risk:Reward Target 1", defval=2.0, step=0.1, group=g_risk, tooltip="Primary take-profit (keep at 2.0)")
+float i_rr2                   = input.float(title="Profit Risk:Reward Target 2", defval=2.5, step=0.1, group=g_risk, tooltip="Secondary TP (reduced from 3)")
+float i_rr3                   = input.float(title="Profit Risk:Reward Target 3", defval=3.0, step=0.1, group=g_risk, tooltip="Final TP (reduced from 4)")
+float i_target1               = input.float(title="Profit % Target 1", defval=40, step= 5, group=g_risk, tooltip="First profit target as percentage of risk (raised so more size closes at TP1)")
+float i_target2               = input.float(title="Profit % Target 2", defval=30, step= 5, group=g_risk, tooltip="Second profit target as percentage of risk")
+float i_riskPerTrade          = input.float(title="Forex Risk Per Trade %", defval=0.6, step=0.1, group=g_risk, tooltip="Risk per trade lowered from 1.0% → 0.6% for better survivability")
 bool i_useLots                = input.bool(title="Use Lots Instead Of Units", defval=false, group=g_risk, tooltip="Display position sizes in lots rather than units")
 bool i_use_Current_TF         = input.bool(title="Use Current TimeFrame", defval=false, group=g_risk, tooltip="Use current chart timeframe for calculations")
 bool i_useAdjusted            = input.bool(title="Use Adjusted", defval=false, group=g_risk, tooltip="Enable dynamic risk adjustment based on volatility")
@@ -122,22 +131,24 @@ fastLength                    = input(9, "Fast MA Length", group=g_MACross, tool
 slowLength                    = input(21, "Slow MA Length", group=g_MACross, tooltip="Period for slow moving average in crossover system")
 
 var g_filter                  = "🟰🟰🟰🟰🟰🟰🟰🟰🟰🟰🟰🟰🟰🟰 ATR Filter Settings  🟟🟰🟰🟰🟰🟰🟰🟰🟰🟰🟰🟰🟰🟰🟰"
-FILTER_ATR_MIN_SIZE           = input.float(title=">= ATR Filter", defval=0.2, minval=0.0, group= g_filter, tooltip="Minimum size of entry candle compared to ATR")
-FILTER_ATR_MAX_SIZE           = input.float(title="<= ATR Filter", defval=2.5, minval=0.0, group= g_filter, tooltip="Maximum size of entry candle compared to ATR")
+// Slightly stricter candle-size filter to avoid micro-range entries
+FILTER_ATR_MIN_SIZE           = input.float(title=">= ATR Filter", defval=0.35, minval=0.0, group= g_filter, tooltip="Minimum size of entry candle compared to ATR (raised from 0.2)")
+FILTER_ATR_MAX_SIZE           = input.float(title="<= ATR Filter", defval=2.2, minval=0.0, group= g_filter, tooltip="Maximum size of entry candle compared to ATR")
 
 // New Performance Filters
+// 5. Only the most useful filters enabled by default (ADX + later HTF). Others stay OFF to avoid over-filtering.
 var g_Performance             = "🟰🟰🟰🟰🟰🟰🟰🟰🟰🟰🟰 Performance Filters 🟟🟰🟰🟰🟰🟰🟰🟰🟰🟰🟰"
 i_use_ema_distance            = input.bool(false, "Use EMA Distance Filter", group=g_Performance)
 ema_distance_mult             = input.float(0.2, "Min EMA Distance (ATR)", step=0.1, minval=0.1, maxval=2.0, group=g_Performance)
 i_use_consolidation           = input.bool(false, "Use Consolidation Filter", group=g_Performance)
 consolidation_bars            = input.int(5, "Consolidation Bars", minval=1, maxval=10, group=g_Performance)
-i_use_adx_filter              = input.bool(false, "Use ADX Strength Filter", group=g_Performance)
-adx_threshold                 = input.int(20, "Min ADX Value", minval=15, maxval=30, group=g_Performance)
+i_use_adx_filter              = input.bool(true, "Use ADX Strength Filter", group=g_Performance, tooltip="ENABLED by default – filters weak trend / chop")
+adx_threshold                 = input.int(22, "Min ADX Value", minval=15, maxval=30, group=g_Performance, tooltip="Raised from 20 → 22 for stronger trends only")
 
 var g_trendConfirm            = "🟰🟰🟰 Trend Confirmation Settings 🟰🟰🟰"
 i_useSTRTrendFilter           = input.bool(false, "Use Trend Confirmation", group=g_trendConfirm)
 trendStrengthLength           = input.int(21, "Trend Strength Period", group=g_trendConfirm)
-minTrendStrength              = input.int(28, "Min ADX for Trend", group=g_trendConfirm)
+minTrendStrength              = input.int(25, "Min ADX for Trend", group=g_trendConfirm)
 
 // Input for volume parameters
 var g_Volume                  = "🟰🟰🟰🟰🟰🟰🟰🟰🟰🟰🟰🟰🟰🟰 Volume parameter Settings 🟟🟰🟰🟰🟰🟰🟰🟰🟰🟰🟰🟰🟰🟰🟰"
@@ -161,7 +172,51 @@ i_maCross_Exit                = input.bool(title="Exit on MA Cross", defval=fals
 
 var g_time                    = "🟰🟰🟰🟰🟰🟰🟰🟰🟰🟰🟰🟰🟰🟰🟰🟰🟰🟰🟰🟰 Time Filter 🟟🟰🟰🟰🟰🟰🟰🟰🟰🟰🟰🟰🟰🟰🟰🟰🟰🟰🟰🟰"
 useTimeFilter                 = input.bool(defval= false, title= "Use Time Filter", group=g_time, tooltip="Enable time-based filtering for trades")
-i_useHTFilter                 = input.bool(defval= false, title= "Use higher Time Fame Filter", group=g_time, tooltip="Enable Higher Time Frame filtering for trades")
+// 6. Higher-Timeframe SuperTrend filter ENABLED by default – major quality boost
+i_useHTFilter                 = input.bool(defval= true, title= "Use higher Time Frame Filter", group=g_time, tooltip="ENABLED by default. Requires 4H SuperTrend to agree with entry direction.")
+
+// ======================== DEBUG / VISUAL CONTROLS ========================
+// All chart clutter is controlled here – turn off anything you don't need.
+var g_debug = "🟦🟦🟦 DEBUG / VISUAL CONTROLS 🟦🟦🟦"
+
+// --- Tables ---
+showDebugPanel            = input.bool(true,  "① Debug Status Table", group=g_debug, tooltip="Live filter status table")
+debugTablePosition        = input.string("top_left", " ↳ Table Position", options=["top_left","top_center","top_right","bottom_left","bottom_center","bottom_right"], group=g_debug)
+showTradeJournal          = input.bool(false, "② Trade Journal Table (last 8)", group=g_debug, tooltip="Compact last-8-trades table")
+tradeJournalPosition      = input.string("bottom_left", " ↳ Journal Position", options=["top_left","top_center","top_right","bottom_left","bottom_center","bottom_right"], group=g_debug)
+//showWFOTable              = input.bool(true,  "③ WFO Results Table", group=g_debug, tooltip="In-Sample vs Out-of-Sample metrics (only when WFO enabled)")
+
+// --- Backgrounds ---
+showFilterBackgrounds     = input.bool(false, "④ Filter-State Backgrounds", group=g_debug, tooltip="Green/Red/Gray tint when filters pass")
+showSignalBackgrounds     = input.bool(false, "⑤ Signal Backgrounds (Long/Short/Buy/Sell)", group=g_debug, tooltip="Colored bars on setup/entry signals")
+showSTBackground          = input.bool(false, "⑥ SuperTrend Trend Background", group=g_debug, tooltip="Subtle blue/fuchsia tint for ST direction")
+showRangeBackground       = input.bool(false, "⑦ Ranging-Market Background", group=g_debug, tooltip="Gray tint when market is classified as ranging")
+
+// --- Lines / Plots ---
+showADXPlot               = input.bool(false, "⑧ Plot ADX (separate pane)", group=g_debug, tooltip="ADX line + threshold in its own pane")
+showRangeHighLow          = input.bool(false, "⑨ Plot Range High / Low / Mid", group=g_debug, tooltip="Teal lines showing regime boundaries")
+showEquityCurveFilter     = input.bool(false, "⑩ Plot Equity + Equity MA (pane)", group=g_debug, tooltip="Equity curve and its MA in a separate pane")
+equityMALength            = input.int(50, " ↳ Equity MA Length", minval=10, maxval=200, group=g_debug)
+showEMAPlot               = input.bool(true,  "⑪ Plot EMA Filter Line", group=g_debug, tooltip="The EMA used as trend filter")
+showSTPlot                = input.bool(true,  "⑫ Plot SuperTrend Line", group=g_debug, tooltip="Main SuperTrend line on chart")
+showSLTPLines             = input.bool(true,  "⑬ Plot SL / TP / BE / Trail lines", group=g_debug, tooltip="Active stop-loss, take-profit, break-even and trailing levels")
+
+// --- Shapes / Markers ---
+showSetupShapes           = input.bool(true,  "⑭ Setup Triangles (Long/Short)", group=g_debug, tooltip="Triangles when a setup is detected")
+showEntryShapes           = input.bool(true,  "⑮ Entry Triangles (actual fills)", group=g_debug, tooltip="Triangles when a trade is actually entered")
+showRawSTFlips            = input.bool(false, "⑯ Raw SuperTrend Flip Circles", group=g_debug, tooltip="Tiny circles on every raw ST direction change")
+showHybridShapes          = input.bool(false, "⑰ Hybrid MR / Push-Back text shapes", group=g_debug, tooltip="Text labels distinguishing MR vs Trend entries")
+
+// --- Labels ---
+showTradeReasonLog        = input.bool(false, "⑱ Trade-by-Trade Reason Labels", group=g_debug, tooltip="Detailed reason label on every real entry")
+showBlockedTradeLog       = input.bool(false, "⑲ Blocked-Flip Reason Labels", group=g_debug, tooltip="Why a SuperTrend flip was rejected (can be noisy)")
+showEntryConditionLabels  = input.bool(false, "⑳ Entry Condition Labels on ST flips", group=g_debug, tooltip="Filter checklist on every raw ST flip")
+showEPLabels              = input.bool(false, "㉑ Entry/TP/SL price labels", group=g_debug, tooltip="EP, TP1-3, SL labels at entry")
+showFloatingStatsLabel    = input.bool(true,  "㉓ Floating Rolling-WR / Equity label", group=g_debug, tooltip="Small live label with rolling win-rate and equity status")
+
+// --- Rolling stats (used by table even if label is off) ---
+showRollingWinRate        = input.bool(true,  "㉔ Track Rolling Win-Rate", group=g_debug, tooltip="Calculates rolling WR for the status table")
+rollingWinRatePeriod      = input.int(20, " ↳ Rolling WR Lookback (trades)", minval=5, maxval=100, group=g_debug)
 timeZone                      = input.string("GMT-5", "Time Zone", group = g_time, 
      tooltip                  = "GMT and UTC is the same thing \nMatch this setting to bottom right time",
      options                  = ["GMT-10", "GMT-9", "GMT-8", "GMT-7", "GMT-6", "GMT-5", "GMT-4", "GMT-3", "GMT+0", "GMT+1", "GMT+2", "GMT+3", "GMT+4", "GMT+5", "GMT+6", "GMT+7", "GMT+8", "GMT+9", "GMT+10", "GMT+10:30", "GMT+11", "GMT+12", "GMT+13", "GMT+13:45"])
@@ -242,31 +297,55 @@ winRateCalculation            = input.string(title="Win Rate Calculation", defva
 
 // Walk-Forward Optimization Section
 var g_wfo = "🟦🟦🟦🟦🟦🟦 Walk Forward Optimization 🟦🟦🟦🟦🟦🟦"
-wfo_enable                   = input.bool(title="Enable Walk-Forward Optimization", defval=false, group=g_wfo, tooltip="Enables Walk-Forward Optimization for testing out-of-sample strategy performance.")
-wfo_insample_length          = input.int(title="In-Sample Length (bars)", defval=500, minval=50, group=g_wfo, tooltip="Number of bars for in-sample optimization period.")
-wfo_outsample_length         = input.int(title="Out-of-Sample Length (bars)", defval=250, minval=25, group=g_wfo, tooltip="Number of bars for out-of-sample validation period.")
-wfo_start_bar                = input.int(title="Walk-Forward Start Bar (offset from left)", defval=1, minval=0, group=g_wfo, tooltip="The first bar index to start walk-forward analysis.")
+wfo_enable                   = input.bool(title="Enable Walk-Forward Optimization", defval=false, group=g_wfo, tooltip="When ON, the strategy only takes trades in Out-of-Sample windows and reports separate IS/OOS metrics. Strategy Tester results then reflect true walk-forward performance.")
+wfo_insample_length          = input.int(title="In-Sample Length (bars)", defval=500, minval=50, group=g_wfo, tooltip="Bars used for 'training' / parameter observation (no trading when WFO mode = OOS Only).")
+wfo_outsample_length         = input.int(title="Out-of-Sample Length (bars)", defval=250, minval=25, group=g_wfo, tooltip="Bars used for real trading / validation. These trades appear in Strategy Tester.")
+wfo_start_bar                = input.int(title="Walk-Forward Start Bar (offset from left)", defval=1, minval=0, group=g_wfo, tooltip="Bar index offset where the first WFO cycle begins.")
+wfo_mode                     = input.string("OOS Only (Recommended)", title="WFO Trading Mode", options=["OOS Only (Recommended)", "Both IS+OOS (track separately)", "IS Only"], group=g_wfo, tooltip="OOS Only = only trade out-of-sample periods (true walk-forward). Both = trade everything but keep separate stats. IS Only = trade only in-sample (for comparison).")
+wfo_close_at_window_end      = input.bool(true, "Force Close at End of Each OOS Window", group=g_wfo, tooltip="Closes any open position when an Out-of-Sample window ends so results stay cleanly segmented.")
+wfo_show_background          = input.bool(true, "Color Background for IS / OOS Phases", group=g_wfo, tooltip="Blue = In-Sample, Orange = Out-of-Sample")
+wfo_show_table               = input.bool(true, "Show WFO Results Table", group=g_wfo, tooltip="Displays In-Sample vs Out-of-Sample performance metrics (only when WFO enabled)")
 
+// --- WFO Phase Calculation ---
 int wfo_cycle = na
 bool in_sample = false
 bool out_sample = false
 int wfo_phase = na
 int wfo_bar_offset = na
+bool wfo_allow_trade = true          // master switch used by entry logic
 
 if wfo_enable
     wfo_bar_offset := bar_index - wfo_start_bar
-    wfo_phase := math.floor(wfo_bar_offset / (wfo_insample_length + wfo_outsample_length))
-    wfo_cycle := wfo_phase
-    int cycle_bar = wfo_bar_offset % (wfo_insample_length + wfo_outsample_length)
-    in_sample := cycle_bar < wfo_insample_length
-    out_sample := not in_sample and cycle_bar < (wfo_insample_length + wfo_outsample_length)
+    if wfo_bar_offset < 0
+        in_sample := false
+        out_sample := false
+        wfo_allow_trade := false
+    else
+        wfo_phase := math.floor(wfo_bar_offset / (wfo_insample_length + wfo_outsample_length))
+        wfo_cycle := wfo_phase
+        int cycle_bar = wfo_bar_offset % (wfo_insample_length + wfo_outsample_length)
+        in_sample := cycle_bar < wfo_insample_length
+        out_sample := not in_sample and cycle_bar < (wfo_insample_length + wfo_outsample_length)
+
+        // Decide whether trading is allowed this bar
+        if wfo_mode == "OOS Only (Recommended)"
+            wfo_allow_trade := out_sample
+        else if wfo_mode == "IS Only"
+            wfo_allow_trade := in_sample
+        else
+            wfo_allow_trade := true   // Both – allow all, just track separately
 else
     wfo_cycle := na
     in_sample := false
     out_sample := false
+    wfo_allow_trade := true
 
-plot(wfo_enable and in_sample ? 1 : na, title="WFO In-Sample Phase", color=color.blue, style=plot.style_stepline, display= display.data_window)
-plot(wfo_enable and out_sample ? 1 : na, title="WFO Out-of-Sample Phase", color=color.orange, style=plot.style_stepline, offset=0, display= display.data_window)
+// Visual phase markers (data window + background)
+plot(wfo_enable and in_sample ? 1 : na, title="WFO In-Sample Phase", color=color.blue, style=plot.style_stepline, display=display.data_window)
+plot(wfo_enable and out_sample ? 1 : na, title="WFO Out-of-Sample Phase", color=color.orange, style=plot.style_stepline, display=display.data_window)
+
+bgcolor(wfo_enable and wfo_show_background and in_sample ? color.new(color.blue, 94) : na, title="WFO In-Sample BG")
+bgcolor(wfo_enable and wfo_show_background and out_sample ? color.new(color.orange, 94) : na, title="WFO Out-of-Sample BG")
 
 // Validate broker type
 validBrokers = array.from("fxpromt4", "ICMarketMT4", "PepperStone")
@@ -678,8 +757,10 @@ rsiBuyExitSignal = rsiBuy
 rsiSellExitSignal = rsiSell
 
 // Impulse Detection
-impulseBull = ta.rising(close, impulseLookback) and (close - ta.lowest(low, impulseLookback)) >= minImpulseATR * ATR_Value
-impulseBear = ta.falling(close, impulseLookback) and (ta.highest(high, impulseLookback) - close) >= minImpulseATR * ATR_Value
+impulseLB_lowest = ta.lowest(low, impulseLookback)
+impulseLB_highest = ta.highest(high, impulseLookback)
+impulseBull = ta.rising(close, impulseLookback) and (close - impulseLB_lowest) >= minImpulseATR * ATR_Value
+impulseBear = ta.falling(close, impulseLookback) and (impulseLB_highest - close) >= minImpulseATR * ATR_Value
 
 rsiMomentumLong  = ta.rising(smoothed_rsi, 2) and smoothed_rsi > 50 * rsiMomentumMult
 rsiMomentumShort = ta.falling(smoothed_rsi, 2) and smoothed_rsi < 50 / rsiMomentumMult
@@ -792,7 +873,7 @@ shortEntryCondition() =>
 
 // Determine if the market is in a range
 isInRange = priceRange <= (rangeThreshold * ATR_Value)
-bgcolor(isInRange ? color.new(color.gray, 90) : na, title="Ranging Market Background (Gray Shade)")
+bgcolor(showRangeBackground and isInRange ? color.new(color.gray, 90) : na, title="Ranging Market Background (Gray Shade)")
 
 finalRangeLong  = isInRange and (rsi < rsiOS * 0.9) and (rsi[1] >= rsiOS) and close > open
 finalRangeShort = isInRange and (rsi > rsiOB * 1.1) and (rsi[1] <= rsiOB) and close < open
@@ -802,7 +883,9 @@ if barstate.isfirst
     stringFormat := syminfo.currency == "JPY" ? "0.000" : "0.00000"
     pair := syminfo.basecurrency + "/" + syminfo.currency
 
-float monteCarloSpread = zen.toPips(zen.random(0, RANDOM_SPREAD))
+bool monteCarloActive = SKIP_TRADE_CHANCE > 0 or RANDOM_SPREAD > 0
+float monteCarloSpread = monteCarloActive and RANDOM_SPREAD > 0 ? zen.toPips(zen.random(0, RANDOM_SPREAD)) : 0.0
+
 
 var bool i_take_LONGS  = i_signalType == "Both" or i_signalType == "Long"
 var bool i_take_SHORTS = i_signalType == "Both" or i_signalType == "Short"
@@ -824,11 +907,11 @@ if barstate.isconfirmed
     // the MDD safety switch entirely for mean-reversion trades, which is a risk
     // management gap. MR trades now respect the drawdown halt the same as trend trades.
     if i_hybridMeanRevInRange and isInRange
-        if finalRangeLong and inTime and allow_trading and (i_allowMultipleTrades or strategy.position_size == 0)
+        if finalRangeLong and inTime and allow_trading and wfo_allow_trade and (i_allowMultipleTrades or strategy.position_size == 0)
             //strategy.entry("Hybrid MR Long", strategy.long, comment="MR Long (Improved)")
             longTrade := true
             mrEntry   := true
-        if finalRangeShort and inTime and allow_trading and (i_allowMultipleTrades or strategy.position_size == 0)
+        if finalRangeShort and inTime and allow_trading and wfo_allow_trade and (i_allowMultipleTrades or strategy.position_size == 0)
             //strategy.entry("Hybrid MR Short", strategy.short, comment="MR Short (Improved)")
             shortTrade := true
             mrEntry    := true
@@ -838,12 +921,12 @@ if barstate.isconfirmed
         if superTrendBuy and not isInRange and not trendDetectedAfterRange
             trendDetectedAfterRange := true
 
-        // Long Entry
-        if superTrendBuy and longEntryCondition() and inTime and (i_allowMultipleTrades or strategy.position_size == 0)
+        // Long Entry (respects WFO gate)
+        if superTrendBuy and longEntryCondition() and inTime and wfo_allow_trade and (i_allowMultipleTrades or strategy.position_size == 0)
             longTrade := true
             mrEntry   := false
 
-        else if superTrendBuy and i_debugMissedTrades
+        else if superTrendBuy and i_debugMissedTrades 
             missedTradeReason := "Long trade missed: "
             if not ema_distance_ok
                 missedTradeReason += "EMA Filter "
@@ -873,12 +956,12 @@ if barstate.isconfirmed
         if superTrendSell and not isInRange and not trendDetectedAfterRange
             trendDetectedAfterRange := true
 
-        // Short Entry
-        if superTrendSell and shortEntryCondition() and inTime and (i_allowMultipleTrades or strategy.position_size == 0)
+        // Short Entry (respects WFO gate)
+        if superTrendSell and shortEntryCondition() and inTime and wfo_allow_trade and (i_allowMultipleTrades or strategy.position_size == 0)
             shortTrade := true
             mrEntry    := false
 
-        else if superTrendSell and i_debugMissedTrades
+        else if superTrendSell and i_debugMissedTrades 
             missedTradeReason := "Short trade missed: "
             if not ema_distance_ok
                 missedTradeReason += "EMA Filter "
@@ -908,10 +991,12 @@ if sessionError
     allow_trading := false
 
 // Monte Carlo Skip simulation
-monteSystemSkip = zen.skipTradeMonteCarlo(SKIP_TRADE_CHANCE, true)
+bool monteSystemSkip = monteCarloActive and SKIP_TRADE_CHANCE > 0 ? zen.skipTradeMonteCarlo(SKIP_TRADE_CHANCE, true) : false
+
 
 // | 🟢 BUY 🟢
-buyTrade = longTrade and i_take_LONGS and not monteSystemSkip and barstate.isconfirmed and allow_trading 
+// WFO gate: when Walk-Forward is enabled, only allow trades according to wfo_mode
+buyTrade = longTrade and i_take_LONGS and not monteSystemSkip and barstate.isconfirmed and allow_trading and wfo_allow_trade
 ATR_Volatility = ta.rma(ATR_Value, 14)
 
 if buyTrade
@@ -977,16 +1062,17 @@ if buyTrade
          + (av_gtdOrder != 0 and av_limitOrder ? gtdString : ""), 
          freq= alert_freq)
 
-    lastTradeLabel1 := label.new(bar_index, tradeEntrySize, text="EP = " + str.tostring(tradeEntrySize, stringFormat), style=label.style_label_lower_left, textcolor = simpleStyle ? chart.fg_color: color.green, color = simpleStyle ? color.new(color.white, 100) : color.new(color.green, 70), size=size.normal)
-    label.delete(lastTradeLabel1[1])
-    lastTradeLabel2 := label.new(bar_index, tradeTarget1, text="TP1 = " + str.tostring(tradeTarget1, stringFormat), style=label.style_label_lower_left, textcolor = simpleStyle ? chart.fg_color: color.green, color = simpleStyle ? color.new(color.white, 100) : color.new(color.green, 90), size=size.normal)
-    label.delete(lastTradeLabel2[1])
-    lastTradeLabel3 := label.new(bar_index, tradeTarget2, text="TP2 = " + str.tostring(tradeTarget2, stringFormat), style=label.style_label_lower_left, textcolor = simpleStyle ? chart.fg_color: color.green, color = simpleStyle ? color.new(color.white, 100) : color.new(color.green, 90), size=size.normal)
-    label.delete(lastTradeLabel3[1])
-    lastTradeLabel4 := label.new(bar_index, tradeTarget3, text="TP3 = " + str.tostring(tradeTarget3, stringFormat), style=label.style_label_lower_left, textcolor = simpleStyle ? chart.fg_color: color.green, color = simpleStyle ? color.new(color.white, 100) : color.new(color.green, 90), size=size.normal)
-    label.delete(lastTradeLabel4[1])
-    lastTradeLabel5 := label.new(bar_index, tradeStop, text="SL = " + str.tostring(tradeStop, stringFormat), style=label.style_label_lower_left, textcolor = simpleStyle ? chart.fg_color: color.green, color = simpleStyle ? color.new(color.white, 100) : color.new(color.green, 90), size=size.normal)
-    label.delete(lastTradeLabel5[1])
+    if showEPLabels
+        lastTradeLabel1 := label.new(bar_index, tradeEntrySize, text="EP = " + str.tostring(tradeEntrySize, stringFormat), style=label.style_label_lower_left, textcolor = simpleStyle ? chart.fg_color: color.green, color = simpleStyle ? color.new(color.white, 100) : color.new(color.green, 70), size=size.normal)
+        label.delete(lastTradeLabel1[1])
+        lastTradeLabel2 := label.new(bar_index, tradeTarget1, text="TP1 = " + str.tostring(tradeTarget1, stringFormat), style=label.style_label_lower_left, textcolor = simpleStyle ? chart.fg_color: color.green, color = simpleStyle ? color.new(color.white, 100) : color.new(color.green, 90), size=size.normal)
+        label.delete(lastTradeLabel2[1])
+        lastTradeLabel3 := label.new(bar_index, tradeTarget2, text="TP2 = " + str.tostring(tradeTarget2, stringFormat), style=label.style_label_lower_left, textcolor = simpleStyle ? chart.fg_color: color.green, color = simpleStyle ? color.new(color.white, 100) : color.new(color.green, 90), size=size.normal)
+        label.delete(lastTradeLabel3[1])
+        lastTradeLabel4 := label.new(bar_index, tradeTarget3, text="TP3 = " + str.tostring(tradeTarget3, stringFormat), style=label.style_label_lower_left, textcolor = simpleStyle ? chart.fg_color: color.green, color = simpleStyle ? color.new(color.white, 100) : color.new(color.green, 90), size=size.normal)
+        label.delete(lastTradeLabel4[1])
+        lastTradeLabel5 := label.new(bar_index, tradeStop, text="SL = " + str.tostring(tradeStop, stringFormat), style=label.style_label_lower_left, textcolor = simpleStyle ? chart.fg_color: color.green, color = simpleStyle ? color.new(color.white, 100) : color.new(color.green, 90), size=size.normal)
+        label.delete(lastTradeLabel5[1])
 
 else if isForceCloseDay() and strategy.position_size != 0
     strategy.close_all(comment= "Market Closed")
@@ -998,7 +1084,8 @@ else if isForceCloseDay() and strategy.position_size != 0
         label.delete(PC_DEBUG_LABEL_CT[1])
 
 // | 🔴 SELL 🔴
-sellTrade = shortTrade and i_take_SHORTS and not monteSystemSkip and barstate.isconfirmed and allow_trading 
+// WFO gate applied to short entries as well
+sellTrade = shortTrade and i_take_SHORTS and not monteSystemSkip and barstate.isconfirmed and allow_trading and wfo_allow_trade
 
 if sellTrade  
     // FIX 3 (continued): pcEntry now calculated HERE with correct short direction.
@@ -1064,16 +1151,17 @@ if sellTrade
          + (av_gtdOrder != 0 and av_limitOrder ? gtdString : ""),
          freq= alert_freq)
 
-    lastTradeLabel1 := label.new(bar_index, tradeEntrySize, text="EP = " + str.tostring(tradeEntrySize, stringFormat), style=label.style_label_lower_left, textcolor = simpleStyle ? chart.fg_color: color.red, color = simpleStyle ? color.new(color.white, 100) : color.new(color.red, 70), size=size.normal)
-    label.delete(lastTradeLabel1[1])
-    lastTradeLabel2 := label.new(bar_index, tradeTarget1, text="TP1 = " + str.tostring(tradeTarget1, stringFormat), style=label.style_label_lower_left, textcolor = simpleStyle ? chart.fg_color: color.red, color = simpleStyle ? color.new(color.white, 100) : color.new(color.red, 90), size=size.normal)
-    label.delete(lastTradeLabel2[1])
-    lastTradeLabel3 := label.new(bar_index, tradeTarget2, text="TP2 = " + str.tostring(tradeTarget2, stringFormat), style=label.style_label_lower_left, textcolor = simpleStyle ? chart.fg_color: color.red, color = simpleStyle ? color.new(color.white, 100) : color.new(color.red, 90), size=size.normal)
-    label.delete(lastTradeLabel3[1])
-    lastTradeLabel4 := label.new(bar_index, tradeTarget3, text="TP3 = " + str.tostring(tradeTarget3, stringFormat), style=label.style_label_lower_left, textcolor = simpleStyle ? chart.fg_color: color.red, color = simpleStyle ? color.new(color.white, 100) : color.new(color.red, 90), size=size.normal)
-    label.delete(lastTradeLabel4[1])
-    lastTradeLabel5 := label.new(bar_index, tradeStop, text="SL = " + str.tostring(tradeStop, stringFormat), style=label.style_label_lower_left, textcolor = simpleStyle ? chart.fg_color: color.red, color = simpleStyle ? color.new(color.white, 100) : color.new(color.red, 90), size=size.normal)
-    label.delete(lastTradeLabel5[1])
+    if showEPLabels
+        lastTradeLabel1 := label.new(bar_index, tradeEntrySize, text="EP = " + str.tostring(tradeEntrySize, stringFormat), style=label.style_label_lower_left, textcolor = simpleStyle ? chart.fg_color: color.red, color = simpleStyle ? color.new(color.white, 100) : color.new(color.red, 70), size=size.normal)
+        label.delete(lastTradeLabel1[1])
+        lastTradeLabel2 := label.new(bar_index, tradeTarget1, text="TP1 = " + str.tostring(tradeTarget1, stringFormat), style=label.style_label_lower_left, textcolor = simpleStyle ? chart.fg_color: color.red, color = simpleStyle ? color.new(color.white, 100) : color.new(color.red, 90), size=size.normal)
+        label.delete(lastTradeLabel2[1])
+        lastTradeLabel3 := label.new(bar_index, tradeTarget2, text="TP2 = " + str.tostring(tradeTarget2, stringFormat), style=label.style_label_lower_left, textcolor = simpleStyle ? chart.fg_color: color.red, color = simpleStyle ? color.new(color.white, 100) : color.new(color.red, 90), size=size.normal)
+        label.delete(lastTradeLabel3[1])
+        lastTradeLabel4 := label.new(bar_index, tradeTarget3, text="TP3 = " + str.tostring(tradeTarget3, stringFormat), style=label.style_label_lower_left, textcolor = simpleStyle ? chart.fg_color: color.red, color = simpleStyle ? color.new(color.white, 100) : color.new(color.red, 90), size=size.normal)
+        label.delete(lastTradeLabel4[1])
+        lastTradeLabel5 := label.new(bar_index, tradeStop, text="SL = " + str.tostring(tradeStop, stringFormat), style=label.style_label_lower_left, textcolor = simpleStyle ? chart.fg_color: color.red, color = simpleStyle ? color.new(color.white, 100) : color.new(color.red, 90), size=size.normal)
+        label.delete(lastTradeLabel5[1])
 
 else if isForceCloseDay() and strategy.position_size != 0
     strategy.close_all(comment= "Market Closed")
@@ -1083,6 +1171,13 @@ else if isForceCloseDay() and strategy.position_size != 0
     if debugCondition and PC_DEBUG_CT
         PC_DEBUG_LABEL_CT := label.new(bar_index, high + (getPipSize() * 10), alertMessage, color=color.gray, textcolor= color.white, style=label.style_label_lower_right)
         label.delete(PC_DEBUG_LABEL_CT[1])
+
+// ===== WFO: Force close at end of each Out-of-Sample window =====
+bool oosWindowEnding = wfo_enable and wfo_close_at_window_end and out_sample[1] and not out_sample and strategy.position_size != 0
+if oosWindowEnding
+    strategy.close_all(comment="WFO OOS Window End")
+    if PC_USED
+        alert(PC_ID + ",closeall," + PC_VAR_SYMBOL + PC_VAR_ACCFILTER + PC_VAR_STRATEGY + PC_VAR_SECRUITY, alert_freq)
 
 // Update trade entry price to match TradingView strategy tester 
 if strategy.position_size != 0
@@ -1214,8 +1309,8 @@ if strategy.position_size < 0
                 label.delete(PC_DEBUG_LABEL_TS[1])
 
 // Calculate randomized spread
-float randomSpreadSL = 0
-float randomSpreadTP = 0
+float randomSpreadSL = 0.0
+float randomSpreadTP = 0.0
 if (strategy.position_size > 0)
     randomSpreadSL := monteCarloSpread
     randomSpreadTP := monteCarloSpread * -1
@@ -1257,28 +1352,41 @@ if debugCondition and ((longTrade and barstate.isconfirmed) or (shortTrade and b
     PC_DEBUG_LABEL := label.new(bar_index, high + (getPipSize() * 10), str.tostring(debugString), color= longTrade ? color.green : color.red, style=label.style_label_lower_left, textcolor= color.black)
     label.delete(PC_DEBUG_LABEL[1])
 
-// Draw conditional data
+// Draw conditional data — every visual is gated by a toggle so the chart stays clean
 float superTrendLine = sttrend == 1 ? stup : stdn
 color stColor = sttrend == 1 ? color.green : color.red
-plot(i_showEMA_Value ? EMA_Value : na, color=close > EMA_Value ? color.green : color.red, linewidth=2, title="EMA")
-plot(plotST ? superTrendLine : na, title="SuperTrend", color= sttrend == 1 ? color.new(color.blue, 80) : color.new(color.fuchsia, 80), linewidth= 2, style= plot.style_line)
-plotshape(longTrade,  style=shape.triangleup,   color=color.green, location=location.belowbar, title="Long Setup")
-plotshape(shortTrade, style=shape.triangledown, color=color.red,   location=location.abovebar, title="Short Setup")
-plotshape(buyTrade,   style=shape.triangleup,   color=color.rgb(53, 198, 57), location=location.belowbar, title="Long Entry")
-plotshape(sellTrade,  style=shape.triangledown, color=color.rgb(240, 40, 40, 2), location=location.abovebar, title="Short Entry")
-plotshape(longTrade and isInRange,   title="Hybrid Mean-Rev Long (in Range)",  style=shape.triangleup,   color=color.white, location=location.belowbar, size=size.normal, text="MR\nLONG")
-plotshape(shortTrade and isInRange,  title="Hybrid Mean-Rev Short (in Range)", style=shape.triangledown, color=color.white, location=location.abovebar, size=size.normal, text="MR\nSHORT")
-plotshape(longTrade and not isInRange,  title="Push-Back Trend Long",  style=shape.triangleup,   color=color.green, location= location.belowbar, size=size.normal, text="PB\nTREND\nLONG")
-plotshape(shortTrade and not isInRange, title="Push-Back Trend Short", style=shape.triangledown, color=color.red,   location= location.abovebar, size=size.normal, text="PB\nTREND\nSHORT")
-plotshape(superTrendBuy,  title="Raw ST Long Flip",  style=shape.circle, location=location.belowbar, color=color.aqua,    size=size.tiny)
-plotshape(superTrendSell, title="Raw ST Short Flip", style=shape.circle, location=location.abovebar, color=color.fuchsia, size=size.tiny)
 
-plot(strategy.position_size != 0 ? tradeStop : na, "SL", color=color.red, linewidth=1, style=plot.style_linebr, display= display.data_window)
-plot(strategy.position_size != 0 and not searchForEXIT ? tradeTarget1 : na, "TP1", color=color.green, linewidth=1, style=plot.style_linebr, display= display.data_window)
-plot(strategy.position_size != 0 and not searchForEXIT ? tradeTarget2 : na, "TP2", color=color.green, linewidth=1, style=plot.style_linebr, display= display.data_window)
-plot(strategy.position_size != 0 and not searchForEXIT ? tradeTarget3 : na, "TP3", color=color.green, linewidth=1, style=plot.style_linebr, display= display.data_window)
-plot(strategy.position_size != 0 and i_BreakEven != 0 ? TradeBreakEvenPrice : na, "BE", color=color.blue, linewidth=1, style=plot.style_linebr, display= display.data_window)
-plot(strategy.position_size != 0 and not TrailStopActivated ? TrailStopActivatePrice : na, "TS", color=color.orange, linewidth=1, style=plot.style_linebr, display= display.data_window)
+// ⑪ EMA line
+plot(showEMAPlot  ? EMA_Value : na, color=close > EMA_Value ? color.green : color.red, linewidth=2, title="EMA")
+
+// ⑫ SuperTrend line
+plot(showSTPlot ? superTrendLine : na, title="SuperTrend", color= sttrend == 1 ? color.new(color.blue, 80) : color.new(color.fuchsia, 80), linewidth= 2, style= plot.style_line)
+
+// ⑭ Setup triangles
+plotshape(showSetupShapes and longTrade,  style=shape.triangleup,   color=color.green, location=location.belowbar, title="Long Setup")
+plotshape(showSetupShapes and shortTrade, style=shape.triangledown, color=color.red,   location=location.abovebar, title="Short Setup")
+
+// ⑮ Entry triangles
+plotshape(showEntryShapes and buyTrade,   style=shape.triangleup,   color=color.rgb(53, 198, 57), location=location.belowbar, title="Long Entry")
+plotshape(showEntryShapes and sellTrade,  style=shape.triangledown, color=color.rgb(240, 40, 40, 2), location=location.abovebar, title="Short Entry")
+
+// ⑰ Hybrid / Push-Back text shapes
+plotshape(showHybridShapes and longTrade and isInRange,   title="Hybrid Mean-Rev Long (in Range)",  style=shape.triangleup,   color=color.white, location=location.belowbar, size=size.normal, display=display.data_window, text="MR\nLONG")
+plotshape(showHybridShapes and shortTrade and isInRange,  title="Hybrid Mean-Rev Short (in Range)", style=shape.triangledown, color=color.white, location=location.abovebar, size=size.normal, display=display.data_window, text="MR\nSHORT")
+plotshape(showHybridShapes and longTrade and not isInRange,  title="Push-Back Trend Long",  style=shape.triangleup,   color=color.green, location= location.belowbar, size=size.normal, display=display.data_window, text="PB\nTREND\nLONG")
+plotshape(showHybridShapes and shortTrade and not isInRange, title="Push-Back Trend Short", style=shape.triangledown, color=color.red,   location= location.abovebar, size=size.normal, display=display.data_window, text="PB\nTREND\nSHORT")
+
+// ⑯ Raw SuperTrend flip circles
+plotshape(showRawSTFlips and superTrendBuy,  title="Raw ST Long Flip",  style=shape.circle, location=location.belowbar, color=color.aqua,    size=size.tiny, display=display.data_window)
+plotshape(showRawSTFlips and superTrendSell, title="Raw ST Short Flip", style=shape.circle, location=location.abovebar, color=color.fuchsia, size=size.tiny, display=display.data_window)
+
+// ⑬ SL / TP / BE / Trail lines (also kept in data window)
+plot(showSLTPLines and strategy.position_size != 0 ? tradeStop : na, "SL", color=color.red, linewidth=1, style=plot.style_linebr)
+plot(showSLTPLines and strategy.position_size != 0 and not searchForEXIT ? tradeTarget1 : na, "TP1", color=color.green, linewidth=1, style=plot.style_linebr)
+plot(showSLTPLines and strategy.position_size != 0 and not searchForEXIT ? tradeTarget2 : na, "TP2", color=color.green, linewidth=1, style=plot.style_linebr)
+plot(showSLTPLines and strategy.position_size != 0 and not searchForEXIT ? tradeTarget3 : na, "TP3", color=color.green, linewidth=1, style=plot.style_linebr)
+plot(showSLTPLines and strategy.position_size != 0 and i_BreakEven != 0 ? TradeBreakEvenPrice : na, "BE", color=color.blue, linewidth=1, style=plot.style_linebr)
+plot(showSLTPLines and strategy.position_size != 0 and not TrailStopActivated ? TrailStopActivatePrice : na, "TS", color=color.orange, linewidth=1, style=plot.style_linebr)
 
 if barstate.islast and i_use_mdd_Label
     label.new(bar_index, high, text="Safety Switch Status: " + (trading_halted ? "HALTED" : "ACTIVE") + 
@@ -1288,11 +1396,415 @@ if barstate.islast and i_use_mdd_Label
          style=label.style_label_lower_left,
          textcolor=color.white)
 
-bgcolor(longTrade  ? color.new(color.green, 70) : na)
-bgcolor(shortTrade ? color.new(color.red,   70) : na)
-bgcolor(buyTrade   ? color.new(color.lime,  70) : na)
-bgcolor(sellTrade  ? color.new(color.white, 70) : na)
-bgcolor(plotST ? (sttrend == 1 ? color.new(color.blue, 95) : color.new(color.fuchsia, 95)) : na, title="SuperTrend Trend Background")
+bgcolor(showSignalBackgrounds and longTrade  ? color.new(color.green, 70) : na)
+bgcolor(showSignalBackgrounds and shortTrade ? color.new(color.red,   70) : na)
+bgcolor(showSignalBackgrounds and buyTrade   ? color.new(color.lime,  70) : na)
+bgcolor(showSignalBackgrounds and sellTrade  ? color.new(color.white, 70) : na)
+bgcolor(showSTBackground and showSTPlot ? (sttrend == 1 ? color.new(color.blue, 95) : color.new(color.fuchsia, 95)) : na, title="SuperTrend Trend Background")
+
+// =====================================================================
+// Pre-calculate advanced debug metrics so they are available for the table
+// ----- Rolling Win-Rate -----
+var array<float> recentTradeResults = array.new_float(0)
+var float rollingWinRate = 0.0
+var int rollingWins = 0
+var int rollingTotal = 0
+
+if strategy.closedtrades > strategy.closedtrades[1]
+    float lastPnL = strategy.closedtrades.profit(strategy.closedtrades - 1)
+    array.push(recentTradeResults, lastPnL > 0 ? 1.0 : 0.0)
+    if array.size(recentTradeResults) > rollingWinRatePeriod
+        array.shift(recentTradeResults)
+
+if array.size(recentTradeResults) > 0
+    rollingWins := 0
+    for i = 0 to array.size(recentTradeResults) - 1
+        rollingWins += int(array.get(recentTradeResults, i))
+    rollingTotal := array.size(recentTradeResults)
+    rollingWinRate := rollingTotal > 0 ? (rollingWins * 100.0 / rollingTotal) : 0.0
+
+// ----- Equity Curve MA -----
+var float equityMA = na
+equityMA := ta.sma(strategy.equity, equityMALength)
+bool equityAboveMA = strategy.equity >= equityMA
+
+// =====================================================================
+// ===================== DEBUG / DIAGNOSTIC PANEL ======================
+// =====================================================================
+// This section gives full visibility into why the strategy takes or blocks trades.
+
+// Calculate live filter status (same logic used for entries)
+bool longFiltersPass  = longEntryCondition()
+bool shortFiltersPass = shortEntryCondition()
+bool rawSTLong        = superTrendBuy
+bool rawSTShort       = superTrendSell
+
+// Background coloring for quick visual debug
+bgcolor(showFilterBackgrounds and longFiltersPass and sttrend == 1 ? color.new(color.green, 92) : na, title="Debug: Long Filters OK")
+bgcolor(showFilterBackgrounds and shortFiltersPass and sttrend == -1 ? color.new(color.red, 92) : na, title="Debug: Short Filters OK")
+bgcolor(showFilterBackgrounds and isInRange ? color.new(color.gray, 93) : na, title="Debug: In Range")
+
+// Optional labels on raw SuperTrend flips showing exact filter status
+if showEntryConditionLabels and barstate.isconfirmed
+    if superTrendBuy
+        string longDebug = "ST LONG FLIP\n" +
+             "EMA: " + (EmaFilterLong ? "✓" : "✗") + "\n" +
+             "ATR: " + (AtrFilter ? "✓" : "✗") + "\n" +
+             "Vol: " + (volumeCondition ? "✓" : "✗") + "\n" +
+             "Consol: " + (consolidation_ok ? "✓" : "✗") + "\n" +
+             "ADX: " + (adx_ok ? "✓" : "✗") + " (" + str.tostring(adx_value, "#.#") + ")\n" +
+             "HTF: " + (htf_long_ok ? "✓" : "✗") + "\n" +
+             "Strong: " + (strongTrend ? "✓" : "✗") + "\n" +
+             "Time: " + (inTime ? "✓" : "✗") + "\n" +
+             "Allow: " + (allow_trading ? "✓" : "✗") + "\n" +
+             "→ ENTRY: " + (longFiltersPass and inTime and allow_trading ? "YES" : "BLOCKED")
+        label.new(bar_index, low, longDebug, style=label.style_label_up, color=longFiltersPass ? color.green : color.orange, textcolor=color.white, size=size.small)
+    if superTrendSell
+        string shortDebug = "ST SHORT FLIP\n" +
+             "EMA: " + (EmaFilterShort ? "✓" : "✗") + "\n" +
+             "ATR: " + (AtrFilter ? "✓" : "✗") + "\n" +
+             "Vol: " + (volumeCondition ? "✓" : "✗") + "\n" +
+             "Consol: " + (consolidation_ok ? "✓" : "✗") + "\n" +
+             "ADX: " + (adx_ok ? "✓" : "✗") + " (" + str.tostring(adx_value, "#.#") + ")\n" +
+             "HTF: " + (htf_short_ok ? "✓" : "✗") + "\n" +
+             "Strong: " + (strongTrend ? "✓" : "✗") + "\n" +
+             "Time: " + (inTime ? "✓" : "✗") + "\n" +
+             "Allow: " + (allow_trading ? "✓" : "✗") + "\n" +
+             "→ ENTRY: " + (shortFiltersPass and inTime and allow_trading ? "YES" : "BLOCKED")
+        label.new(bar_index, high, shortDebug, style=label.style_label_down, color=shortFiltersPass ? color.red : color.orange, textcolor=color.white, size=size.small)
+
+// ===== LIVE STATUS TABLE =====
+var table debugTable = na
+if showDebugPanel and barstate.islast
+    pos = debugTablePosition == "top_left" ? position.top_left :
+          debugTablePosition == "top_center" ? position.top_center :
+          debugTablePosition == "top_right" ? position.top_right :
+          debugTablePosition == "bottom_left" ? position.bottom_left :
+          debugTablePosition == "bottom_center" ? position.bottom_center : position.bottom_right
+    debugTable := table.new(pos, 2, 19, bgcolor=color.new(color.black, 20), border_width=1, border_color=color.gray)
+
+    // Header
+    table.cell(debugTable, 0, 0, "DEBUG STATUS", text_color=color.white, text_size=size.small, bgcolor=color.new(color.blue, 40))
+    table.cell(debugTable, 1, 0, "VALUE", text_color=color.white, text_size=size.small, bgcolor=color.new(color.blue, 40))
+
+    // SuperTrend
+    table.cell(debugTable, 0, 1, "SuperTrend", text_color=color.white, text_size=size.tiny)
+    table.cell(debugTable, 1, 1, sttrend == 1 ? "BULL ▲" : "BEAR ▼", text_color=sttrend == 1 ? color.lime : color.red, text_size=size.tiny)
+
+    // Range state
+    table.cell(debugTable, 0, 2, "Market Regime", text_color=color.white, text_size=size.tiny)
+    table.cell(debugTable, 1, 2, isInRange ? "RANGE" : "TREND", text_color=isInRange ? color.orange : color.aqua, text_size=size.tiny)
+
+    // ADX
+    table.cell(debugTable, 0, 3, "ADX (" + str.tostring(adx_threshold) + ")", text_color=color.white, text_size=size.tiny)
+    table.cell(debugTable, 1, 3, str.tostring(adx_value, "#.#") + "  " + f_statusText(adx_ok), bgcolor=f_statusColor(adx_ok), text_color=color.white, text_size=size.tiny)
+
+    // HTF
+    table.cell(debugTable, 0, 4, "HTF 4H Filter", text_color=color.white, text_size=size.tiny)
+    table.cell(debugTable, 1, 4, i_useHTFilter ? (htf_trend == 1 ? "BULL" : "BEAR") : "OFF", text_color=i_useHTFilter ? (htf_trend == 1 ? color.lime : color.red) : color.gray, text_size=size.tiny)
+
+    // ATR Filter
+    table.cell(debugTable, 0, 5, "ATR Candle Filter", text_color=color.white, text_size=size.tiny)
+    table.cell(debugTable, 1, 5, f_statusText(AtrFilter), bgcolor=f_statusColor(AtrFilter), text_color=color.white, text_size=size.tiny)
+
+    // Volume
+    table.cell(debugTable, 0, 6, "Volume Filter", text_color=color.white, text_size=size.tiny)
+    table.cell(debugTable, 1, 6, i_use_volume_filter ? f_statusText(volumeCondition) : "OFF", bgcolor=i_use_volume_filter ? f_statusColor(volumeCondition) : color.new(color.gray, 70), text_color=color.white, text_size=size.tiny)
+
+    // Consolidation
+    table.cell(debugTable, 0, 7, "Consolidation OK", text_color=color.white, text_size=size.tiny)
+    table.cell(debugTable, 1, 7, f_statusText(consolidation_ok), bgcolor=f_statusColor(consolidation_ok), text_color=color.white, text_size=size.tiny)
+
+    // EMA
+    table.cell(debugTable, 0, 8, "EMA Filter", text_color=color.white, text_size=size.tiny)
+    table.cell(debugTable, 1, 8, i_ema_filter_Length == 0 ? "OFF" : f_statusText(EmaFilterLong or EmaFilterShort), bgcolor=i_ema_filter_Length == 0 ? color.new(color.gray, 70) : f_statusColor(EmaFilterLong or EmaFilterShort), text_color=color.white, text_size=size.tiny)
+
+    // Time / Session
+    table.cell(debugTable, 0, 9, "Time / Session", text_color=color.white, text_size=size.tiny)
+    table.cell(debugTable, 1, 9, f_statusText(inTime), bgcolor=f_statusColor(inTime), text_color=color.white, text_size=size.tiny)
+
+    // MDD / Allow Trading
+    table.cell(debugTable, 0, 10, "Trading Allowed", text_color=color.white, text_size=size.tiny)
+    table.cell(debugTable, 1, 10, allow_trading ? "YES ✓" : "HALTED ✗", bgcolor=allow_trading ? color.new(color.green, 70) : color.new(color.red, 40), text_color=color.white, text_size=size.tiny)
+
+    // Current DD
+    table.cell(debugTable, 0, 11, "Current DD %", text_color=color.white, text_size=size.tiny)
+    table.cell(debugTable, 1, 11, str.tostring(current_drawdown, "#.##") + "%", text_color=current_drawdown > 10 ? color.red : color.white, text_size=size.tiny)
+
+    // Hybrid status
+    table.cell(debugTable, 0, 12, "Hybrid MR Mode", text_color=color.white, text_size=size.tiny)
+    table.cell(debugTable, 1, 12, i_hybridMeanRevInRange ? "ON" : "OFF", text_color=i_hybridMeanRevInRange ? color.orange : color.gray, text_size=size.tiny)
+
+    // Overall Long / Short readiness
+    table.cell(debugTable, 0, 13, "LONG Ready?", text_color=color.white, text_size=size.tiny, bgcolor=color.new(color.green, 80))
+    table.cell(debugTable, 1, 13, longFiltersPass and inTime and allow_trading ? "READY ▲" : "WAITING", text_color=longFiltersPass and inTime and allow_trading ? color.lime : color.gray, text_size=size.tiny)
+
+    table.cell(debugTable, 0, 14, "SHORT Ready?", text_color=color.white, text_size=size.tiny, bgcolor=color.new(color.red, 80))
+    table.cell(debugTable, 1, 14, shortFiltersPass and inTime and allow_trading ? "READY ▼" : "WAITING", text_color=shortFiltersPass and inTime and allow_trading ? color.red : color.gray, text_size=size.tiny)
+
+    // Position
+    table.cell(debugTable, 0, 15, "Open Position", text_color=color.white, text_size=size.tiny)
+    table.cell(debugTable, 1, 15, strategy.position_size > 0 ? "LONG" : strategy.position_size < 0 ? "SHORT" : "FLAT", text_color=strategy.position_size > 0 ? color.lime : strategy.position_size < 0 ? color.red : color.gray, text_size=size.tiny)
+
+    // --- New metrics (v5.4) ---
+    // Rolling Win Rate
+    table.cell(debugTable, 0, 16, "Rolling WR (" + str.tostring(rollingWinRatePeriod) + ")", text_color=color.white, text_size=size.tiny)
+    table.cell(debugTable, 1, 16, str.tostring(rollingWinRate, "#.#") + "% (" + str.tostring(rollingWins) + "/" + str.tostring(rollingTotal) + ")", 
+         text_color=rollingWinRate >= 40 ? color.lime : rollingWinRate >= 30 ? color.yellow : color.red, text_size=size.tiny)
+
+    // Equity Curve Filter
+    table.cell(debugTable, 0, 17, "Equity vs MA", text_color=color.white, text_size=size.tiny)
+    table.cell(debugTable, 1, 17, equityAboveMA ? "ABOVE ✓" : "BELOW ✗", 
+         bgcolor=equityAboveMA ? color.new(color.green, 70) : color.new(color.red, 50), text_color=color.white, text_size=size.tiny)
+
+    // Closed trades count
+    table.cell(debugTable, 0, 18, "Closed Trades", text_color=color.white, text_size=size.tiny)
+    table.cell(debugTable, 1, 18, str.tostring(strategy.closedtrades), text_color=color.white, text_size=size.tiny)
+
+// =====================================================================
+// ============== EXTRA DEBUG VISUALS (ADX + Range + Trade Log) ========
+// =====================================================================
+
+// 1. ADX Plot (separate pane)
+plot(showADXPlot ? adx_value : na, title="ADX", color=color.new(color.orange, 0), linewidth=2, display=display.pane)
+hline(showADXPlot ? adx_threshold : na, "ADX Threshold", color=color.new(color.gray, 30), linestyle=hline.style_dashed, display=display.all)
+hline(showADXPlot ? 25 : na, "ADX Strong Trend", color=color.new(color.green, 50), linestyle=hline.style_dotted, display=display.all)
+
+// 2. Range High / Low lines (used by regime + hybrid logic)
+plot(showRangeHighLow ? highestHigh : na, title="Range High", color=color.new(color.teal, 40), linewidth=1, style=plot.style_linebr, display=display.data_window)
+plot(showRangeHighLow ? lowestLow : na, title="Range Low", color=color.new(color.teal, 40), linewidth=1, style=plot.style_linebr, display=display.data_window)
+plot(showRangeHighLow ? (highestHigh + lowestLow) / 2 : na, title="Range Mid", color=color.new(color.teal, 70), linewidth=1, style=plot.style_linebr, display=display.data_window)
+
+// Fill between range high/low when in range for visual clarity
+fill(plot(showRangeHighLow and isInRange ? highestHigh : na, display=display.none),
+     plot(showRangeHighLow and isInRange ? lowestLow : na, display=display.none),
+     color=color.new(color.gray, 85), title="Active Range Zone")
+
+// 3. Trade-by-Trade Reason Log
+// Logs every actual entry (buyTrade / sellTrade) with full context
+if showTradeReasonLog and barstate.isconfirmed
+    if buyTrade
+        string reasonLong = "▲ LONG ENTRY\n" +
+             "Type: " + (mrEntry ? "Mean-Rev" : "Trend/Push-Back") + "\n" +
+             "ST: " + (sttrend == 1 ? "Bull" : "Bear") + "\n" +
+             "ADX: " + str.tostring(adx_value, "#.#") + (adx_ok ? " ✓" : " ✗") + "\n" +
+             "HTF: " + (htf_long_ok ? "Agree ✓" : "Disagree ✗") + "\n" +
+             "Range: " + (isInRange ? "YES" : "NO") + "\n" +
+             "ATR Filter: " + (AtrFilter ? "✓" : "✗") + "\n" +
+             "Vol: " + (volumeCondition ? "✓" : "✗") + "\n" +
+             "Risk: " + str.tostring(i_riskPerTrade) + "%\n" +
+             "SL: " + str.tostring(tradeStop, "#.#####")
+        label.new(bar_index, low, reasonLong,
+             style=label.style_label_up,
+             color=color.new(color.green, 20),
+             textcolor=color.white,
+             size=size.normal,
+             tooltip="Full long entry context")
+
+    if sellTrade
+        string reasonShort = "▼ SHORT ENTRY\n" +
+             "Type: " + (mrEntry ? "Mean-Rev" : "Trend/Push-Back") + "\n" +
+             "ST: " + (sttrend == 1 ? "Bull" : "Bear") + "\n" +
+             "ADX: " + str.tostring(adx_value, "#.#") + (adx_ok ? " ✓" : " ✗") + "\n" +
+             "HTF: " + (htf_short_ok ? "Agree ✓" : "Disagree ✗") + "\n" +
+             "Range: " + (isInRange ? "YES" : "NO") + "\n" +
+             "ATR Filter: " + (AtrFilter ? "✓" : "✗") + "\n" +
+             "Vol: " + (volumeCondition ? "✓" : "✗") + "\n" +
+             "Risk: " + str.tostring(i_riskPerTrade) + "%\n" +
+             "SL: " + str.tostring(tradeStop, "#.#####")
+        label.new(bar_index, high, reasonShort,
+             style=label.style_label_down,
+             color=color.new(color.red, 20),
+             textcolor=color.white,
+             size=size.normal,
+             tooltip="Full short entry context")
+
+// 4. Optional log of BLOCKED SuperTrend flips (can be noisy – off by default)
+if showBlockedTradeLog and barstate.isconfirmed
+    if superTrendBuy and not buyTrade
+        string blockLong = "✕ BLOCKED LONG\n" +
+             (not EmaFilterLong ? "• EMA filter\n" : "") +
+             (not AtrFilter ? "• ATR candle size\n" : "") +
+             (not volumeCondition ? "• Volume\n" : "") +
+             (not consolidation_ok ? "• Consolidation\n" : "") +
+             (not adx_ok ? "• ADX (" + str.tostring(adx_value, "#.#") + ")\n" : "") +
+             (not htf_long_ok ? "• HTF disagreement\n" : "") +
+             (not strongTrend ? "• Trend strength\n" : "") +
+             (not inTime ? "• Time/Session\n" : "") +
+             (not allow_trading ? "• MDD Halt\n" : "") +
+             (not i_allowMultipleTrades and strategy.position_size != 0 ? "• Position already open\n" : "")
+        label.new(bar_index, low, blockLong,
+             style=label.style_label_up,
+             color=color.new(color.orange, 30),
+             textcolor=color.black,
+             size=size.small)
+
+    if superTrendSell and not sellTrade
+        string blockShort = "✕ BLOCKED SHORT\n" +
+             (not EmaFilterShort ? "• EMA filter\n" : "") +
+             (not AtrFilter ? "• ATR candle size\n" : "") +
+             (not volumeCondition ? "• Volume\n" : "") +
+             (not consolidation_ok ? "• Consolidation\n" : "") +
+             (not adx_ok ? "• ADX (" + str.tostring(adx_value, "#.#") + ")\n" : "") +
+             (not htf_short_ok ? "• HTF disagreement\n" : "") +
+             (not strongTrend ? "• Trend strength\n" : "") +
+             (not inTime ? "• Time/Session\n" : "") +
+             (not allow_trading ? "• MDD Halt\n" : "") +
+             (not i_allowMultipleTrades and strategy.position_size != 0 ? "• Position already open\n" : "")
+        label.new(bar_index, high, blockShort,
+             style=label.style_label_down,
+             color=color.new(color.orange, 30),
+             textcolor=color.black,
+             size=size.small)
+
+// =====================================================================
+// =========== ADVANCED DEBUG REFINEMENTS (v5.4) =======================
+// =====================================================================
+// (Rolling WR + Equity MA already calculated earlier so the main table can use them)
+
+bool equityFilterOK = not showEquityCurveFilter or equityAboveMA   // ready for future use as a real filter
+
+plot(showEquityCurveFilter ? strategy.equity : na, title="Equity", color=color.new(color.blue, 0), linewidth=2, display=display.pane)
+plot(showEquityCurveFilter ? equityMA : na, title="Equity MA", color=color.new(color.orange, 0), linewidth=1, display=display.pane)
+bgcolor(showEquityCurveFilter and not equityAboveMA ? color.new(color.red, 92) : na, title="Equity Below MA (Losing Regime)")
+
+// ----- 3. Compact Trade Journal (last 8 closed trades) -----
+var table journalTable = na
+if showTradeJournal and barstate.islast
+    jPos = tradeJournalPosition == "top_left" ? position.top_left :
+           tradeJournalPosition == "top_center" ? position.top_center :
+           tradeJournalPosition == "top_right" ? position.top_right :
+           tradeJournalPosition == "bottom_left" ? position.bottom_left :
+           tradeJournalPosition == "bottom_center" ? position.bottom_center : position.bottom_right
+    journalTable := table.new(jPos, 5, 9, bgcolor=color.new(color.black, 15), border_width=1, border_color=color.gray)
+
+    // Header
+    table.cell(journalTable, 0, 0, "#", text_color=color.white, text_size=size.tiny, bgcolor=color.new(color.blue, 40))
+    table.cell(journalTable, 1, 0, "Dir", text_color=color.white, text_size=size.tiny, bgcolor=color.new(color.blue, 40))
+    table.cell(journalTable, 2, 0, "P&L $", text_color=color.white, text_size=size.tiny, bgcolor=color.new(color.blue, 40))
+    table.cell(journalTable, 3, 0, "Bars", text_color=color.white, text_size=size.tiny, bgcolor=color.new(color.blue, 40))
+    table.cell(journalTable, 4, 0, "Result", text_color=color.white, text_size=size.tiny, bgcolor=color.new(color.blue, 40))
+
+    int totalClosed = strategy.closedtrades
+    int rowsToShow = math.min(8, totalClosed)
+
+    for i = 0 to rowsToShow - 1
+        int tradeIdx = totalClosed - 1 - i
+        if tradeIdx >= 0
+            float pnl = strategy.closedtrades.profit(tradeIdx)
+            int entryBar = strategy.closedtrades.entry_bar_index(tradeIdx)
+            int exitBar  = strategy.closedtrades.exit_bar_index(tradeIdx)
+            int barsHeld = exitBar - entryBar
+            // Direction: positive size at entry = long
+            bool wasLong = strategy.closedtrades.size(tradeIdx) > 0
+            string dirTxt = wasLong ? "▲ L" : "▼ S"
+            string resTxt = pnl > 0 ? "WIN" : pnl < 0 ? "LOSS" : "BE"
+            color resCol  = pnl > 0 ? color.new(color.green, 60) : pnl < 0 ? color.new(color.red, 60) : color.new(color.gray, 60)
+
+            table.cell(journalTable, 0, i + 1, str.tostring(totalClosed - i), text_color=color.gray, text_size=size.tiny)
+            table.cell(journalTable, 1, i + 1, dirTxt, text_color=wasLong ? color.lime : color.red, text_size=size.tiny)
+            table.cell(journalTable, 2, i + 1, (pnl >= 0 ? "+" : "") + str.tostring(pnl, "#.##"), text_color=pnl >= 0 ? color.lime : color.red, text_size=size.tiny)
+            table.cell(journalTable, 3, i + 1, str.tostring(barsHeld), text_color=color.white, text_size=size.tiny)
+            table.cell(journalTable, 4, i + 1, resTxt, bgcolor=resCol, text_color=color.white, text_size=size.tiny)
+
+// ----- Update the main Debug Status Table with the new metrics -----
+if showFloatingStatsLabel and barstate.islast
+    string rollingTxt = showRollingWinRate ? ("Rolling WR (" + str.tostring(rollingTotal) + "): " + str.tostring(rollingWinRate, "#.#") + "%  (" + str.tostring(rollingWins) + "W)") : ""
+    string equityTxt  = showEquityCurveFilter ? ("Equity vs MA: " + (equityAboveMA ? "ABOVE ✓" : "BELOW ✗")) : ""
+    string wfoTxt     = wfo_enable ? ("WFO: " + (out_sample ? "OOS" : in_sample ? "IS" : "—") + " | Mode: " + wfo_mode) : ""
+    string combined   = rollingTxt + (rollingTxt != "" and equityTxt != "" ? "\n" : "") + equityTxt + ((rollingTxt != "" or equityTxt != "") and wfoTxt != "" ? "\n" : "") + wfoTxt
+    if combined != ""
+        label.new(bar_index, high, combined,
+             style=label.style_label_lower_left,
+             color=color.new(color.black, 30),
+             textcolor=color.white,
+             size=size.small,
+             xloc=xloc.bar_index,
+             yloc=yloc.price)
+
+// =====================================================================
+// ===================== WFO PERFORMANCE TRACKING ======================
+// =====================================================================
+// Separate tallies for In-Sample and Out-of-Sample closed trades.
+// When WFO is ON + "OOS Only", Strategy Tester already only contains OOS trades.
+// When mode = "Both", these counters still give you the split view.
+
+var int    is_trades = 0
+var int    is_wins   = 0
+var float  is_profit = 0.0
+var int    oos_trades = 0
+var int    oos_wins   = 0
+var float  oos_profit = 0.0
+var int    lastTrackedTrade = -1
+
+// Detect newly closed trades and attribute them to IS or OOS based on the phase at entry
+if strategy.closedtrades > 0 and strategy.closedtrades != lastTrackedTrade
+    int idx = strategy.closedtrades - 1
+    float pnl = strategy.closedtrades.profit(idx)
+    // Approximate phase at entry: use the bar index of entry if available
+    int entryBarIdx = strategy.closedtrades.entry_bar_index(idx)
+    bool entryWasOOS = false
+    bool entryWasIS  = false
+    if wfo_enable and entryBarIdx >= wfo_start_bar
+        int off = entryBarIdx - wfo_start_bar
+        int cyc = off % (wfo_insample_length + wfo_outsample_length)
+        entryWasIS  := cyc < wfo_insample_length
+        entryWasOOS := not entryWasIS
+    else if not wfo_enable
+        // When WFO is off we treat everything as a single pool (still update OOS for convenience)
+        entryWasOOS := true
+
+    if entryWasIS
+        is_trades += 1
+        is_profit += pnl
+        if pnl > 0
+            is_wins += 1
+    if entryWasOOS
+        oos_trades += 1
+        oos_profit += pnl
+        if pnl > 0
+            oos_wins += 1
+    lastTrackedTrade := strategy.closedtrades
+
+float is_winrate  = is_trades > 0 ? (is_wins * 100.0 / is_trades) : 0.0
+float oos_winrate = oos_trades > 0 ? (oos_wins * 100.0 / oos_trades) : 0.0
+
+// ----- WFO Results Table -----
+var table wfoTable = na
+if wfo_enable and wfo_show_table  and barstate.islast
+    wfoTable := table.new(position.bottom_right, 3, 8, bgcolor=color.new(color.black, 10), border_width=1, border_color=color.gray)
+
+    table.cell(wfoTable, 0, 0, "WFO RESULTS", text_color=color.white, text_size=size.small, bgcolor=color.new(color.purple, 40))
+    table.cell(wfoTable, 1, 0, "In-Sample", text_color=color.white, text_size=size.small, bgcolor=color.new(color.blue, 40))
+    table.cell(wfoTable, 2, 0, "Out-of-Sample", text_color=color.white, text_size=size.small, bgcolor=color.new(color.orange, 40))
+
+    table.cell(wfoTable, 0, 1, "Trades", text_color=color.white, text_size=size.tiny)
+    table.cell(wfoTable, 1, 1, str.tostring(is_trades), text_color=color.white, text_size=size.tiny)
+    table.cell(wfoTable, 2, 1, str.tostring(oos_trades), text_color=color.white, text_size=size.tiny)
+
+    table.cell(wfoTable, 0, 2, "Wins", text_color=color.white, text_size=size.tiny)
+    table.cell(wfoTable, 1, 2, str.tostring(is_wins), text_color=color.lime, text_size=size.tiny)
+    table.cell(wfoTable, 2, 2, str.tostring(oos_wins), text_color=color.lime, text_size=size.tiny)
+
+    table.cell(wfoTable, 0, 3, "Win Rate", text_color=color.white, text_size=size.tiny)
+    table.cell(wfoTable, 1, 3, str.tostring(is_winrate, "#.#") + "%", text_color=is_winrate >= 35 ? color.lime : color.red, text_size=size.tiny)
+    table.cell(wfoTable, 2, 3, str.tostring(oos_winrate, "#.#") + "%", text_color=oos_winrate >= 35 ? color.lime : color.red, text_size=size.tiny)
+
+    table.cell(wfoTable, 0, 4, "Net Profit $", text_color=color.white, text_size=size.tiny)
+    table.cell(wfoTable, 1, 4, (is_profit >= 0 ? "+" : "") + str.tostring(is_profit, "#.##"), text_color=is_profit >= 0 ? color.lime : color.red, text_size=size.tiny)
+    table.cell(wfoTable, 2, 4, (oos_profit >= 0 ? "+" : "") + str.tostring(oos_profit, "#.##"), text_color=oos_profit >= 0 ? color.lime : color.red, text_size=size.tiny)
+
+    table.cell(wfoTable, 0, 5, "Mode", text_color=color.white, text_size=size.tiny)
+    table.cell(wfoTable, 1, 5, wfo_mode, text_color=color.aqua, text_size=size.tiny)
+    table.cell(wfoTable, 2, 5, wfo_allow_trade ? "TRADING" : "FLAT", text_color=wfo_allow_trade ? color.lime : color.gray, text_size=size.tiny)
+
+    table.cell(wfoTable, 0, 6, "Current Phase", text_color=color.white, text_size=size.tiny)
+    table.cell(wfoTable, 1, 6, in_sample ? "IN-SAMPLE" : "—", text_color=color.blue, text_size=size.tiny)
+    table.cell(wfoTable, 2, 6, out_sample ? "OUT-OF-SAMPLE" : "—", text_color=color.orange, text_size=size.tiny)
+
+    table.cell(wfoTable, 0, 7, "Cycle #", text_color=color.white, text_size=size.tiny)
+    table.cell(wfoTable, 1, 7, str.tostring(nz(wfo_cycle, 0)), text_color=color.white, text_size=size.tiny)
+    table.cell(wfoTable, 2, 7, "IS " + str.tostring(wfo_insample_length) + " / OOS " + str.tostring(wfo_outsample_length), text_color=color.gray, text_size=size.tiny)
 
 // --- BEGIN MONTHLY PERFORMANCE AND TESTER CODE --- //
 var float balance     = strategy.initial_capital
@@ -1716,7 +2228,7 @@ if drawTester
             else
                 testTable.cell(0, 0, "Timeframe Unsupported")
         else
-            int minutesInDrawdown = drawdownBarsArray.max() * int(str.tonumber(timeframe.period))
+            float minutesInDrawdown = drawdownBarsArray.max() * str.tonumber(timeframe.period)
             if (minutesInDrawdown <= 60)
                 timeInDrawdown := str.tostring(minutesInDrawdown) + " minutes"
                 avgDrawdown    := str.tostring(averageBarsInDD * str.tonumber(timeframe.period), "#.##") + " minutes"
